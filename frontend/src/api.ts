@@ -47,8 +47,21 @@ const DEFAULT_BASE =
 function getBase(): string {
   try {
     const stored = localStorage.getItem("api_base");
-    if (stored !== null) return stored;
-  } catch { /* ignore */ }
+
+    if (stored !== null) {
+      console.log("API Base: manual config (localStorage)");
+      return stored;
+    }
+  } catch {}
+
+  if (import.meta.env.VITE_API_BASE) {
+    console.log("API Base: env config");
+  } else if (import.meta.env.DEV) {
+    console.log("API Base: localhost dev config");
+  } else {
+    console.log("API Base: nginx / same-origin config");
+  }
+
   return DEFAULT_BASE;
 }
 
