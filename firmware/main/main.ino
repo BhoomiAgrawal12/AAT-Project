@@ -17,12 +17,9 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 
-// -------- USER CONFIG --------
-#define WIFI_SSID   "Ruchi ka Wifi"
-#define WIFI_PASS   "no.pass.123"
-#define SERVER_URL  "http://192.168.1.14:8001/api/ingest"
-#define DEVICE_ID   "rudy-wrist-01"
-// -----------------------------
+// Credentials live in secrets.h (gitignored). Copy secrets.example.h ->
+// secrets.h, fill in WIFI_SSID / WIFI_PASS / SERVER_URL / DEVICE_ID.
+#include "secrets.h"
 
 // ADXL345
 static const uint8_t ADXL345_ADDR       = 0x53;
