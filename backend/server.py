@@ -49,7 +49,7 @@ from pydantic import BaseModel, Field
 # Configuration
 # ---------------------------------------------------------------------------
 
-LABELS = ["curl", "squat", "rest"]
+LABELS = ["curl", "squat", "rest", "other"]
 IDX_REST = LABELS.index("rest")
 WINDOW = 50
 CONFIDENCE_FORM_THRESHOLD = 0.85
@@ -219,18 +219,18 @@ class Classifier:
             probs = self.model.predict(norm_window[np.newaxis, ...], verbose=0)[0]
             probs = np.asarray(probs, dtype=np.float32)
             return int(np.argmax(probs)), float(np.max(probs)), probs.tolist()
-        # ---------- Heuristic fallback (3 classes: curl / squat / rest) ----------
+        # ---------- Heuristic fallback (4 classes: curl / squat / rest / other) ----------
         ax, ay, az = window[:, 0], window[:, 1], window[:, 2]
         energy = float(np.std(ax) + np.std(ay) + np.std(az))
         if energy < 0.08:
-            probs = [0.02, 0.02, 0.96]               # rest
+            probs = [0.02, 0.02, 0.94, 0.02]         # rest
         else:
             std_x, std_y, std_z = float(np.std(ax)), float(np.std(ay)), float(np.std(az))
             dom = int(np.argmax([std_x, std_y, std_z]))
             if dom == 2:
-                probs = [0.10, 0.80, 0.10]           # squat (z dominant)
+                probs = [0.08, 0.76, 0.08, 0.08]     # squat (z dominant)
             else:
-                probs = [0.80, 0.10, 0.10]           # curl (x or y dominant)
+                probs = [0.76, 0.08, 0.08, 0.08]     # curl (x or y dominant)
         arr = np.asarray(probs, dtype=np.float32)
         return int(np.argmax(arr)), float(np.max(arr)), arr.tolist()
 
@@ -341,7 +341,8 @@ class RepCounter:
             if self.session_id is not None:
                 with db_connect() as conn:
                     # Switch set if the active exercise changed
-                    if exercise != "rest":
+                    # "other" and "rest" are both non-active — no set opened
+                    if exercise not in ("rest", "other"):
                         if self.current_exercise is None or (
                             self.current_exercise != exercise
                         ):
@@ -355,7 +356,8 @@ class RepCounter:
                             self.hi_conf += 1
 
                     # Rep state machine: active -> rest -> active-of-same
-                    if exercise == "rest":
+                    # "other" behaves like "rest": resets to rest state, no rep counted
+                    if exercise in ("rest", "other"):
                         if self.state == "active":
                             self.state = "rest"
                     else:

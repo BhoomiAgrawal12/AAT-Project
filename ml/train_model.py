@@ -32,12 +32,20 @@ import numpy as np
 # ──────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────
-LABELS: List[str] = ["curl", "squat", "rest"]
+
+LABELS: List[str] = ["curl", "squat", "rest", "other"]
 LABEL_TO_IDX: Dict[str, int] = {n: i for i, n in enumerate(LABELS)}
 N_CLASSES: int = len(LABELS)
 WINDOW: int = 50          # samples (= 1 second at 50 Hz)
 STRIDE: int = 25          # 50 % overlap
 FS: int = 50              # target sampling frequency (Hz)
+
+# Max windows to sample from the "other" class to keep balance.
+# "other" has 60k+ windows available — we cap it to avoid dominating.
+MAX_OTHER_WINDOWS: int = 12000
+# "rest" class: only real worn-sensor rest (no "Device on Table" — 51k
+# windows of a sensor sitting on a table is unrealistic for a wrist device).
+MAX_REST_WINDOWS: int = 10000
 
 # RecoFit exercise-index → our label
 # accelDataMatrix columns: [timestamp, ax, ay, az]  (g-units, 50 Hz)
@@ -53,10 +61,28 @@ RECOFIT_MAP: Dict[int, str] = {
     52: "squat",  # Squat (hands behind head)
     53: "squat",  # Squat (kettlebell / goblet)
     54: "squat",  # Squat Jump
-    # ----- rest -----
+    # ----- rest (real worn-sensor rest only, no "Device on Table") -----
     40: "rest",   # Rest
     31: "rest",   # Non-Exercise
-    11: "rest",   # Device on Table
+    # ----- other (everything else — keeps model from defaulting to squat) ---
+    37: "other",  # Pushup (knee or foot variation)
+    38: "other",  # Pushups
+    29: "other",  # Lunge (alternating)
+    71: "other",  # Walking lunge
+    45: "other",  # Shoulder Press (dumbbell)
+    55: "other",  # Squat Rack Shoulder Press
+    48: "other",  # Sit-up
+    49: "other",  # Sit-ups
+    14: "other",  # Dumbbell Row (knee on bench)
+    13: "other",  # Dumbbell Deadlift Row
+    10: "other",  # Crunch
+    43: "other",  # Russian Twist
+    70: "other",  # Walk
+     7: "other",  # Burpee
+    23: "other",  # Jumping Jacks
+    24: "other",  # Kettlebell Swing
+    25: "other",  # Lateral Raise
+    22: "other",  # Jump Rope
 }
 
 RECOFIT_URL = (
@@ -119,15 +145,13 @@ def _extract_windows_mat(mat_path: Path) -> Tuple[np.ndarray, np.ndarray]:
     n_subjects, n_exercises = sd.shape
     print(f"  subjects={n_subjects}, exercise_types={n_exercises}")
 
-    windows: List[np.ndarray] = []
-    labels: List[int] = []
+    # Collect per-label so we can cap "other" and "rest"
+    per_label_windows: Dict[str, List[np.ndarray]] = {l: [] for l in LABELS}
 
     for exercise_idx, label_name in RECOFIT_MAP.items():
-        label_idx = LABEL_TO_IDX[label_name]
         if exercise_idx >= n_exercises:
             continue
-
-        count_before = len(windows)
+        count_before = len(per_label_windows[label_name])
         for subj in range(n_subjects):
             cell = sd[subj, exercise_idx]
             if cell.size == 0:
@@ -138,18 +162,31 @@ def _extract_windows_mat(mat_path: Path) -> Tuple[np.ndarray, np.ndarray]:
                 accel = data_struct["accelDataMatrix"]  # (N, 4): [t, ax, ay, az]
                 if accel.shape[0] < WINDOW:
                     continue
-                # columns 1-3 = ax, ay, az in g-units
                 xyz = accel[:, 1:4].astype(np.float32)
-                # sliding windows
                 for start in range(0, len(xyz) - WINDOW + 1, STRIDE):
-                    w = xyz[start : start + WINDOW]          # (50, 3)
-                    windows.append(w)
-                    labels.append(label_idx)
+                    per_label_windows[label_name].append(xyz[start : start + WINDOW])
             except (KeyError, IndexError, ValueError):
                 continue
-
-        added = len(windows) - count_before
+        added = len(per_label_windows[label_name]) - count_before
         print(f"  {label_name:6s} (ex{exercise_idx:02d}): +{added} windows")
+
+    # Apply caps to keep class balance
+    rng_cap = np.random.default_rng(42)
+    for lbl, cap in [("other", MAX_OTHER_WINDOWS), ("rest", MAX_REST_WINDOWS)]:
+        if len(per_label_windows[lbl]) > cap:
+            idx = rng_cap.choice(len(per_label_windows[lbl]), cap, replace=False)
+            per_label_windows[lbl] = [per_label_windows[lbl][i] for i in sorted(idx)]
+            print(f"  {lbl:6s}: capped to {cap:,} windows")
+
+    print("\nFinal per-class counts:")
+    windows: List[np.ndarray] = []
+    labels: List[int] = []
+    for lbl in LABELS:
+        wins = per_label_windows[lbl]
+        label_idx = LABEL_TO_IDX[lbl]
+        windows.extend(wins)
+        labels.extend([label_idx] * len(wins))
+        print(f"  {lbl:8s}: {len(wins):6,} windows")
 
     if not windows:
         raise RuntimeError("No windows extracted — check dataset file.")
