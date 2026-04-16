@@ -53,7 +53,19 @@ LABELS = ["curl", "squat", "rest", "other"]
 IDX_REST = LABELS.index("rest")
 WINDOW = 50
 CONFIDENCE_FORM_THRESHOLD = 0.85
-RATE_LIMIT_PER_MIN = 100
+RATE_LIMIT_PER_MIN = 120   # raised: firmware now sends every 0.5 s (2×/s)
+
+# Rep counting tuning
+# VALLEY_CONF  — if the model still predicts the exercise but with confidence
+#                below this, we treat it as the "valley" between reps (arm at
+#                the bottom / top of the movement).  Combined with the explicit
+#                rest/other class this lets the counter work even when the brief
+#                pause between reps is < 1 window (500 ms).
+# ACTIVE_CONF  — confidence must rise back above this to credit a new rep.
+# MIN_REP_S    — minimum seconds between two counted reps (~75 reps/min max).
+VALLEY_CONF = 0.60
+ACTIVE_CONF = 0.70
+MIN_REP_S   = 0.8
 
 BACKEND_DIR = Path(__file__).resolve().parent
 MODEL_PATH = Path(os.environ.get("MODEL_PATH", BACKEND_DIR / "model.h5"))
@@ -260,6 +272,11 @@ class RepCounter:
         self.hi_conf: int = 0
         self.total: int = 0
         self.set_id: Optional[int] = None
+        # Valley detection: True while we are in the "bottom" of a rep
+        # (either the model classified rest/other, or confidence dipped below
+        # VALLEY_CONF while still predicting the exercise).
+        self.in_valley: bool = False
+        self.last_rep_time: float = 0.0     # wall-clock time of last counted rep
         self.last_prediction: Dict[str, Any] = {
             "exercise": "rest",
             "confidence": 0.0,
@@ -309,6 +326,8 @@ class RepCounter:
         self.hi_conf = 0
         self.total = 0
         self.set_id = None
+        self.in_valley = False
+        self.last_rep_time = 0.0
 
     def _open_set_locked(self, conn: sqlite3.Connection, exercise: str) -> None:
         cur = conn.execute(
@@ -355,14 +374,41 @@ class RepCounter:
                         if confidence >= CONFIDENCE_FORM_THRESHOLD:
                             self.hi_conf += 1
 
-                    # Rep state machine: active -> rest -> active-of-same
-                    # "other" behaves like "rest": resets to rest state, no rep counted
+                    # ── Rep state machine ──────────────────────────────────
+                    # A rep is the sequence:  peak → valley → peak (same ex.)
+                    #
+                    # "valley" is entered when:
+                    #   a) the model predicts rest/other  (arm fully at rest), OR
+                    #   b) the model still predicts the exercise but with low
+                    #      confidence (< VALLEY_CONF) — catches the brief pause
+                    #      at the bottom/top of a fast rep that is shorter than
+                    #      one 1-second window.
+                    #
+                    # A rep is counted when confidence rises back above
+                    # ACTIVE_CONF for the same exercise, provided the refractory
+                    # period (MIN_REP_S) has elapsed since the last counted rep.
+                    # This prevents double-counting on overlapping windows.
                     if exercise in ("rest", "other"):
+                        # Explicit rest / unrecognised motion → enter valley
                         if self.state == "active":
                             self.state = "rest"
+                        self.in_valley = True
+                    elif confidence < VALLEY_CONF:
+                        # Confidence dip while still predicting the exercise
+                        # (transition point between reps)
+                        if self.state == "active":
+                            self.state = "rest"
+                        self.in_valley = True
                     else:
-                        if self.state == "rest" and self.last_active_exercise == exercise:
+                        # Confidence is high — we are in the active part of a rep
+                        if (
+                            self.in_valley
+                            and self.last_active_exercise == exercise
+                            and (now - self.last_rep_time) >= MIN_REP_S
+                        ):
                             self.reps += 1
+                            self.last_rep_time = now
+                        self.in_valley = False
                         self.state = "active"
                         self.last_active_exercise = exercise
 
