@@ -262,11 +262,19 @@ class RepCounter:
     (e.g. curl -> squat) we open a new `set` row, so form score is per-set.
     """
 
+    # How many consecutive windows of a DIFFERENT exercise we must see before
+    # switching the active set. Prevents a single noisy "squat" blip mid-curl
+    # from resetting the rep count.
+    SWITCH_THRESHOLD = 3
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.session_id: Optional[int] = None
         self.current_exercise: Optional[str] = None
         self.last_active_exercise: Optional[str] = None
+        # Smoothing: track consecutive predictions of a candidate new exercise
+        self._pending_exercise: Optional[str] = None
+        self._pending_count: int = 0
         self.state: str = "rest"            # "rest" or "active"
         self.reps: int = 0                  # reps for the current set
         self.hi_conf: int = 0
@@ -328,6 +336,8 @@ class RepCounter:
         self.set_id = None
         self.in_valley = False
         self.last_rep_time = 0.0
+        self._pending_exercise = None
+        self._pending_count = 0
 
     def _open_set_locked(self, conn: sqlite3.Connection, exercise: str) -> None:
         cur = conn.execute(
@@ -359,14 +369,33 @@ class RepCounter:
             now = time.time()
             if self.session_id is not None:
                 with db_connect() as conn:
-                    # Switch set if the active exercise changed
-                    # "other" and "rest" are both non-active — no set opened
+                    # Switch set if the active exercise changed — but only
+                    # after SWITCH_THRESHOLD consecutive windows of the new
+                    # exercise. Prevents a single noisy "squat" blip mid-curl
+                    # from resetting the rep count.
                     if exercise not in ("rest", "other"):
-                        if self.current_exercise is None or (
-                            self.current_exercise != exercise
-                        ):
-                            self._close_set_locked(conn)
+                        if self.current_exercise is None:
+                            # First active prediction — open set immediately
                             self._open_set_locked(conn, exercise)
+                            self._pending_exercise = None
+                            self._pending_count = 0
+                        elif self.current_exercise != exercise:
+                            # Different exercise — accumulate toward switch
+                            if self._pending_exercise == exercise:
+                                self._pending_count += 1
+                            else:
+                                self._pending_exercise = exercise
+                                self._pending_count = 1
+                            # Only switch after N consecutive windows agree
+                            if self._pending_count >= self.SWITCH_THRESHOLD:
+                                self._close_set_locked(conn)
+                                self._open_set_locked(conn, exercise)
+                                self._pending_exercise = None
+                                self._pending_count = 0
+                        else:
+                            # Same exercise as current — reset any pending switch
+                            self._pending_exercise = None
+                            self._pending_count = 0
 
                     # Track form score counters for the current set
                     if self.set_id is not None:
@@ -767,7 +796,7 @@ def ingest(body: IngestRequest) -> IngestResponse:
     return IngestResponse(
         exercise=exercise,
         confidence=round(conf, 4),
-        probabilities={LABELS[i]: round(float(probs[i]), 4) for i in range(len(LABELS))},
+        probabilities={LABELS[i]: round(float(probs[i]), 4) for i in range(min(len(LABELS), len(probs)))},
         reps=state["reps"],
         form_score=round(state["form_score"], 4),
         session_id=state["session_id"],
